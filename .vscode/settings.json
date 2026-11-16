@@ -1,0 +1,19 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/Scripts/python.exe",
+  "pylint.interpreter": [
+    "${workspaceFolder}/venv/Scripts/python.exe"
+  ],
+  "pylint.enabled": false,
+  "python.analysis.typeCheckingMode": "off",
+  "ruff.lint.select": [
+    "E9",
+    "F63",
+    "F7",
+    "F82"
+  ],
+  "ruff.lint.extendSelect": [],
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportUndefinedVariable": "error",
+    "reportMissingImports": "error"
+  }
+}

@@ -1,0 +1,6 @@
+flet==1.0.0
+google-auth-oauthlib
+requests
+psycopg[binary]
+psycopg_pool
+pillowpip 
