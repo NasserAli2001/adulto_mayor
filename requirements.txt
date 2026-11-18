@@ -1,7 +1,7 @@
 flet==1.0.5
 flet-web==1.0.5
 google-auth-oauthlib
-requestspython -m pip install --upgrade flet-cli==1.0.5 flet-desktop==1.0.5
+requests
 psycopg[binary]
 psycopg_pool
 pillow
