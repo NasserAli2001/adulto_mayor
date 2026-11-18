@@ -28,7 +28,7 @@ ICONO_ESTADO = {"Solicitada": ft.Icons.SCHEDULE, "Asignada": ft.Icons.PERSON_ADD
 ICONO_TIPO = {"Cita médica": ft.Icons.MEDICAL_SERVICES, "Trámite o diligencia": ft.Icons.DESCRIPTION,
               "Compras": ft.Icons.SHOPPING_CART, "Visita o paseo": ft.Icons.PEOPLE,
               "Otro": ft.Icons.MORE_HORIZ}
-TIPOS = list(ICONO_TIPO)
+TIPOS = db.TIPOS_SERVICIO
 ROLES = {"adulto_mayor": "Adulto mayor", "familiar": "Familiar / cuidador", "acompanante": "Acompañante"}
 
 NIVELES = [1.0, 1.25, 1.5]  # tamaños de letra: normal, grande, muy grande
@@ -42,14 +42,11 @@ ROLES_NOMBRE = {**ROLES, "administrador": "Administrador (asignador)", "superadm
 # CAMBIE este correo por el del proyecto antes de usar la app con personas reales (aparece en los términos)
 CONTACTO_DATOS = "acompanaplus@correo.com"
 
-DOCUMENTOS = ["Cédula de ciudadanía", "Cédula de extranjería", "Pasaporte", "Otro documento"]
-GENEROS = ["Femenino", "Masculino", "Otro", "Prefiero no decirlo"]
-PARENTESCOS = ["Hijo/a", "Nieto/a", "Esposo/a o pareja", "Hermano/a", "Amigo/a o vecino/a", "Otro familiar",
-               "Otra persona"]
-MOVILIDAD = ["Camina sin ayuda", "Usa bastón", "Usa andador", "Usa silla de ruedas",
-             "Necesita que lo ayuden a movilizarse"]
-FORMACION = ["Bachiller", "Técnico o tecnólogo", "Auxiliar de enfermería o cuidador certificado", "Profesional",
-             "Otra"]
+DOCUMENTOS = db.DOCUMENTOS
+GENEROS = db.GENEROS
+PARENTESCOS = db.PARENTESCOS
+MOVILIDAD = db.MOVILIDAD
+FORMACION = db.FORMACION
 
 # Cada campo: (columna, tipo, etiqueta, ícono, obligatorio, opciones). Tipos: texto, tel, multi, lista, fecha
 SOBRE_USTED = [
@@ -164,6 +161,26 @@ def hora_bonita(hhmm):
     h, m = map(int, hhmm.split(":"))
     return f"{h % 12 or 12}:{m:02d} {'a. m.' if h < 12 else 'p. m.'}"
 
+
+def texto_duracion(minutos):
+    """60 -> '1 hora', 90 -> '1 hora y media', 30 -> 'media hora', None -> 'Tiempo indefinido'."""
+    if minutos is None:
+        return "Tiempo indefinido"
+    h, m = divmod(int(minutos), 60)
+    if h == 0:
+        return "media hora"
+    return f"{h} hora{'' if h == 1 else 's'}" + (" y media" if m else "")
+
+
+# Duraciones que se pueden elegir al pedir una cita: de 1 hora en adelante, de media en media hora, o indefinida
+DURACIONES = [(str(m), texto_duracion(m)) for m in range(db.DURACION_MINIMA, db.DURACION_MAXIMA + 1, db.PASO_DURACION)] \
+    + [("indefinida", "Tiempo indefinido (el acompañante la finaliza)")]
+EXTENSIONES = [(str(m), texto_duracion(m)) for m in range(db.PASO_DURACION, db.EXTRA_MAXIMA + 1, db.PASO_DURACION)]
+
+
+def codigo_bonito(c):
+    c = c or ""
+    return f"{c[:3]} {c[3:]}" if len(c) == 6 else c
 
 # ---------- Componentes reutilizables ----------
 def txt(t, size=20, bold=False, color=TEXTO, **kw):
@@ -431,7 +448,7 @@ class App:
             return
         self.user = u
         Ajustes.nivel = u.get("escala") or 0
-        self.foto = db.leer_foto(u.get("foto"))
+        self.foto = db.foto_de(u["id"])
         self.continuar()
 
     def continuar(self):
@@ -452,14 +469,14 @@ class App:
         db.auditar(self.user["id"], "entrar_a_cuenta", uid, f"tipo {objetivo['rol']}")
         self.real, self.user = self.user, objetivo
         Ajustes.nivel = objetivo.get("escala") or 0
-        self.foto = db.leer_foto(objetivo.get("foto"))
+        self.foto = db.foto_de(objetivo["id"])
         self.inicio()
 
     def salir_suplantacion(self, e=None):
         db.auditar(self.real["id"], "salir_de_cuenta", self.user["id"])
         self.user, self.real = self.real, None
         Ajustes.nivel = self.user.get("escala") or 0
-        self.foto = db.leer_foto(self.user.get("foto"))
+        self.foto = db.foto_de(self.user["id"])
         self.inicio()
 
     def salir(self, e=None):
@@ -554,6 +571,8 @@ class App:
                  linea(ft.Icons.ACCESS_TIME, hora_bonita(s["hora"])),
                  linea(ft.Icons.PLACE, f"Desde: {s['origen']}"),
                  linea(ft.Icons.FLAG, f"Hasta: {s['destino']}")]
+        filas += self.lineas_tiempo(s)
+        filas += self.lineas_codigo(s)
         if rol != "adulto_mayor":
             filas.append(linea(ft.Icons.PERSON, f"Para: {s['solicitante']}"))
             if rol in ("acompanante", *db.ROLES_ADMIN) and s.get("prom_solicitante") is not None:
@@ -581,6 +600,8 @@ class App:
                   linea(ft.Icons.FLAG, f"Hasta: {s['destino']}"),
                   linea(ft.Icons.NOTES, f"Observaciones: {s['observaciones'] or 'Ninguna'}"),
                   linea(ft.Icons.SUPPORT_AGENT, f"Acompañante: {s['acompanante'] or 'Aún sin asignar'}")]
+        lineas += self.lineas_tiempo(s)
+        lineas += self.lineas_codigo(s)
         if s["obs_final"]:
             lineas.append(linea(ft.Icons.RATE_REVIEW, f"Observaciones finales: {s['obs_final']}"))
         lineas += self.calif_lineas(s)
@@ -598,6 +619,106 @@ class App:
                                 lambda ev: self.whatsapp(s["tel_acompanante"]), VERDE))
         lineas.append(boton("Cerrar", ft.Icons.CLOSE, self.cerrar, GRIS))
         self.dialogo(s["tipo"], *lineas, icono=ICONO_TIPO.get(s["tipo"], ft.Icons.EVENT))
+
+    # ---------- Duración, código de seguridad y extensión del servicio ----------
+    def lineas_tiempo(self, s):
+        base, extra = s.get("duracion_min"), s.get("minutos_extra") or 0
+        if base is None:
+            filas = [linea(ft.Icons.TIMER, "Tiempo indefinido: el acompañante la finaliza cuando termine")]
+        else:
+            texto = f"Duración: {texto_duracion(base + extra)}"
+            if extra:
+                texto += f" (incluye {texto_duracion(extra)} adicional)"
+            fin = db.fin_estimado(s)
+            if fin:
+                texto += f", hasta las {hora_bonita(fin.strftime('%H:%M'))}"
+            filas = [linea(ft.Icons.TIMER, texto)]
+            if (s["estado"] == "En curso" and fin and db.ahora_local() > fin
+                    and self.user["rol"] in ("adulto_mayor", "familiar")):
+                filas.append(linea(ft.Icons.INFO, "Ya pasó la hora prevista de fin. Si el acompañante sigue con "
+                                                  "usted, puede extender el tiempo."))
+        if s.get("inicio_real"):
+            filas.append(linea(ft.Icons.PLAY_ARROW, f"Iniciada a las {hora_bonita(s['inicio_real'][11:16])}"))
+        if s.get("fin_real"):
+            filas.append(linea(ft.Icons.STOP_CIRCLE, f"Finalizada a las {hora_bonita(s['fin_real'][11:16])}"))
+        return filas
+
+    def lineas_codigo(self, s):
+        """El código solo lo ve quien pidió la cita (adulto mayor o familiar); el acompañante debe pedírselo."""
+        if self.user["rol"] not in ("adulto_mayor", "familiar") or not s.get("codigo_seguridad"):
+            return []
+        filas = [ft.Row([ft.Icon(ft.Icons.KEY, color=MORADO, size=sz(30)),
+                         txt("Código de seguridad", 18, True, GRIS)], spacing=8),
+                 ft.Text(codigo_bonito(s["codigo_seguridad"]), size=sz(38), weight=ft.FontWeight.BOLD,
+                         color=MORADO, selectable=True),
+                 txt("Entréguelo al acompañante solo cuando llegue. Sin este código no puede iniciar el servicio.", 17)]
+        if s.get("codigo_bloqueado"):
+            filas.append(txt("Este código se bloqueó por intentos fallidos. Genere uno nuevo.", 17, True, ROJO))
+        return [ft.Container(ft.Column(filas, spacing=4), padding=12, bgcolor="#F3E5F5", border_radius=12)]
+
+    def mostrar_codigo(self, sid):
+        codigo = db.codigo_de(sid, self.user["id"])
+        if not codigo:
+            return
+        self.dialogo("Cita guardada",
+                     txt("Este es el código de seguridad de su cita:", 19),
+                     ft.Text(codigo_bonito(codigo), size=sz(44), weight=ft.FontWeight.BOLD, color=MORADO,
+                             selectable=True, text_align=ft.TextAlign.CENTER),
+                     txt("Sin este código el acompañante no puede iniciar el servicio. Entréguelo solo cuando "
+                         "llegue. Lo verá siempre en «Mis citas».", 18),
+                     boton("Entendido", ft.Icons.CHECK, self.cerrar, VERDE), icono=ft.Icons.KEY, color=MORADO)
+
+    def nuevo_codigo(self, s):
+        def hacer():
+            ok, res = db.regenerar_codigo(s["id"], self.user["id"])
+            (self._actual or self.inicio)()
+            if ok:
+                self.mostrar_codigo(s["id"])
+            else:
+                self.alerta("No se pudo generar el código", res)
+
+        self.confirmar("¿Generar un código nuevo?", "El código anterior dejará de servir. Úselo si se bloqueó o "
+                       "si se lo dio a la persona equivocada.", "Sí, generar uno nuevo", hacer, MORADO, ft.Icons.KEY)
+
+    def extender_servicio(self, s):
+        """El acompañante extiende el servicio con el código de seguridad (lo autoriza el adulto mayor)."""
+        codigo = campo("Código de seguridad", keyboard_type=ft.KeyboardType.NUMBER, prefix_icon=ft.Icons.KEY)
+        mas = desplegable("Tiempo adicional", EXTENSIONES, "60")
+        err = txt("", 18, color=ROJO)
+
+        def ok(ev):
+            exito, msg = db.ampliar_con_codigo(s["id"], self.user["id"], codigo.value or "", int(mas.value or 60))
+            if exito:
+                self.cerrar()
+                self.acomp()
+                self.aviso(msg)
+            else:
+                err.value = msg
+                self.page.update()
+
+        self.dialogo("Extender el servicio",
+                     txt("Pídale el código de seguridad al adulto mayor: él autoriza el tiempo extra.", 18),
+                     codigo, mas, err, boton("Extender", ft.Icons.MORE_TIME, ok, VERDE),
+                     boton("Cancelar", ft.Icons.CLOSE, self.cerrar, GRIS), icono=ft.Icons.MORE_TIME)
+
+    def extender_cliente(self, s):
+        """El adulto mayor (o su familiar) extiende el tiempo desde su propia cuenta."""
+        mas = desplegable("Tiempo adicional", EXTENSIONES, "60")
+        err = txt("", 18, color=ROJO)
+
+        def ok(ev):
+            exito, msg = db.ampliar_cliente(s["id"], self.user["id"], int(mas.value or 60))
+            if exito:
+                self.cerrar()
+                (self._actual or self.inicio)()
+                self.aviso(msg)
+            else:
+                err.value = msg
+                self.page.update()
+
+        self.dialogo("Extender el tiempo", txt("¿Cuánto tiempo más necesita al acompañante?", 19), mas, err,
+                     boton("Extender", ft.Icons.MORE_TIME, ok, VERDE),
+                     boton("Cancelar", ft.Icons.CLOSE, self.cerrar, GRIS), icono=ft.Icons.MORE_TIME)
 
     # ---------- Calificaciones (0 a 5 estrellas, en los dos sentidos) ----------
     def texto_calificar(self):
@@ -714,7 +835,8 @@ class App:
         para = desplegable("¿Para quién es?", [(str(a["id"]), a["nombre"]) for a in adultos],
                            str(adultos[0]["id"]) if len(adultos) == 1 else None) if es_fam else None
         tipo = desplegable("¿Qué necesita?", [(t, t) for t in TIPOS])
-        hora = desplegable("Hora", [(h, hora_bonita(h)) for h in HORAS])
+        hora = desplegable("Hora de inicio", [(h, hora_bonita(h)) for h in HORAS])
+        duracion = desplegable("¿Cuánto tiempo necesita al acompañante?", DURACIONES, "60")
         origen = campo("¿Desde dónde sale?", prefix_icon=ft.Icons.PLACE)
         destino = campo("¿A dónde va?", prefix_icon=ft.Icons.FLAG)
         obs = campo("Observaciones (opcional)", multiline=True, min_lines=2)
@@ -758,26 +880,28 @@ class App:
 
             def confirmar(e2):
                 benef = int(para.value) if es_fam else self.user["id"]
+                minutos = None if duracion.value == "indefinida" else int(duracion.value or 60)
                 nuevo, msg = db.crear_solicitud(self.user["id"], benef, tipo.value, elegida["fecha"].isoformat(),
-                                                hora.value, origen.value, destino.value, obs.value or "")
+                                                hora.value, origen.value, destino.value, obs.value or "", minutos)
                 self.cerrar()
                 if nuevo is None:
                     self.alerta("No se pudo guardar la cita", msg)
                     return
                 self.lista(False)
-                self.aviso("Solicitud guardada. Estado: Solicitada.")
+                self.mostrar_codigo(nuevo)
 
             self.dialogo("Revise su solicitud",
                          linea(ICONO_TIPO[tipo.value], tipo.value),
                          linea(ft.Icons.CALENDAR_MONTH, fecha_bonita(elegida["fecha"])),
                          linea(ft.Icons.ACCESS_TIME, hora_bonita(hora.value)),
+                         linea(ft.Icons.TIMER, "Duración: " + dict(DURACIONES).get(duracion.value or "60", "")),
                          linea(ft.Icons.PLACE, f"Desde: {origen.value}"),
                          linea(ft.Icons.FLAG, f"Hasta: {destino.value}"),
                          boton("Confirmar", ft.Icons.CHECK_CIRCLE, confirmar, VERDE),
                          boton("Corregir", ft.Icons.EDIT, self.cerrar, GRIS), icono=ft.Icons.FACT_CHECK)
 
-        self.render("Pedir acompañamiento", *([para] if para else []), tipo, caja_fecha, hora, origen,
-                    destino, obs, err, boton("Revisar y confirmar", ft.Icons.FACT_CHECK, revisar),
+        self.render("Pedir acompañamiento", *([para] if para else []), tipo, caja_fecha, hora, duracion,
+                    origen, destino, obs, err, boton("Revisar y confirmar", ft.Icons.FACT_CHECK, revisar),
                     volver=self.inicio,
                     guardia=lambda: any([tipo.value, hora.value, elegida["fecha"], (origen.value or "").strip(),
                                          (destino.value or "").strip(), (obs.value or "").strip()]))
@@ -787,6 +911,11 @@ class App:
         tarjetas = []
         for s in db.solicitudes_de(self.user["id"], historial):
             acc = [boton("Ver detalle", ft.Icons.VISIBILITY, lambda e, s=s: self.detalle(s))]
+            if s["estado"] == "En curso" and s.get("duracion_min") is not None:
+                acc.append(boton("Extender el tiempo", ft.Icons.MORE_TIME, lambda e, s=s: self.extender_cliente(s), TEAL))
+            if s["estado"] in db.ACTIVOS and s.get("codigo_seguridad"):
+                acc.append(boton_borde("Generar código nuevo", ft.Icons.AUTORENEW, lambda e, s=s: self.nuevo_codigo(s),
+                                       MORADO))
             if s["estado"] in ("Solicitada", "Asignada"):
                 acc.append(boton("Cancelar cita", ft.Icons.CANCEL, lambda e, s=s: self.cancelar(s), ROJO))
             if self.puede_calificar(s):
@@ -831,7 +960,7 @@ class App:
             ok, msg = db.guardar_foto(u["id"], archivos[0].path)
             if ok:
                 self.user = db.obtener_usuario(u["id"])
-                self.foto = db.leer_foto(self.user["foto"])
+                self.foto = db.foto_de(self.user["id"])
                 self.perfil()
             self.aviso(msg)
 
@@ -944,8 +1073,11 @@ class App:
                                                       lambda e, s=s: self.iniciar(s), VERDE), det],
                                             extra=[ventana]))
             elif s["estado"] == "En curso":
-                activos.append(self.tarjeta(s, [boton("Finalizar servicio", ft.Icons.STOP_CIRCLE,
-                                                      lambda e, s=s: self.finalizar(s), ROJO), det]))
+                acc = [boton("Finalizar servicio", ft.Icons.STOP_CIRCLE, lambda e, s=s: self.finalizar(s), ROJO)]
+                if s.get("duracion_min") is not None:
+                    acc.insert(0, boton("Extender el tiempo", ft.Icons.MORE_TIME,
+                                        lambda e, s=s: self.extender_servicio(s), TEAL))
+                activos.append(self.tarjeta(s, acc + [det]))
         self.render(f"Hola, {self.user['nombre'].split()[0]}", self.resumen_acomp(servicios),
                     txt("Servicios pendientes", 24, True),
                     *(activos or [caja(linea(ft.Icons.INFO, "No tiene servicios pendientes."))]),
@@ -971,12 +1103,28 @@ class App:
                     volver=volver or self.inicio)
 
     def iniciar(self, s):
-        ok, msg = db.iniciar_servicio(s["id"], self.user["id"])
-        if ok:
-            self.acomp()
-            self.aviso(msg)
-        else:
+        ok, msg = db.revisar_inicio(s["id"], self.user["id"])
+        if not ok:
             self.alerta("No se puede iniciar el servicio", msg)
+            return
+        codigo = campo("Código de seguridad", keyboard_type=ft.KeyboardType.NUMBER, prefix_icon=ft.Icons.KEY)
+        err = txt("", 18, color=ROJO)
+
+        def entrar(ev):
+            exito, m = db.iniciar_servicio(s["id"], self.user["id"], codigo.value or "")
+            if exito:
+                self.cerrar()
+                self.acomp()
+                self.aviso(m)
+            else:
+                err.value = m
+                self.page.update()
+
+        self.dialogo("Iniciar el servicio",
+                     txt("Pídale al adulto mayor (o a su familiar) el código de seguridad de la cita. "
+                         "Sin él no se puede iniciar.", 18),
+                     codigo, err, boton("Iniciar", ft.Icons.PLAY_ARROW, entrar, VERDE),
+                     boton("Cancelar", ft.Icons.CLOSE, self.cerrar, GRIS), icono=ft.Icons.KEY, color=MORADO)
 
     def finalizar(self, s):
         obs = campo("Observaciones finales (opcional)", multiline=True, min_lines=2)
@@ -1288,7 +1436,7 @@ class App:
         if u["rol"] in db.ROLES_PUBLICOS:
             estado_txt.append(linea(ft.Icons.STAR, f"Calificación: {prom} de 5 ({n_calif(n)})" if prom is not None
                                     else "Sin calificaciones", icono_color=AMBAR))
-        cabecera = caja(ft.Row([avatar(db.leer_foto(u.get("foto")), u["nombre"], sz(56)),
+        cabecera = caja(ft.Row([avatar(db.foto_de(u["id"]), u["nombre"], sz(56)),
                                 ft.Column([txt(u["nombre"], 22, True), txt(ROLES_NOMBRE.get(u["rol"], u["rol"]), 18),
                                            txt(u["email"], 17, color=GRIS)], spacing=2, expand=True)], spacing=12),
                         *estado_txt)

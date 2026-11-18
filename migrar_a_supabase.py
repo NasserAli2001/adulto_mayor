@@ -1,13 +1,23 @@
-"""Copia los datos del archivo local acompana.db a la base de datos de Supabase.
+"""Herramientas para la base de datos en la nube (Supabase).
 
-Uso (con DATABASE_URL puesta en el .env):   python migrar_a_supabase.py
-Se puede repetir sin duplicar datos. Si la nube ya tiene OTROS datos, se detiene sin tocar nada.
+  python migrar_a_supabase.py                    copia los datos de su archivo local acompana.db a Supabase
+  python migrar_a_supabase.py --borrar-respaldo  borra las copias *_v1 que deja la conversión a 30 tablas
+
+Necesita la línea DATABASE_URL en el archivo .env. Se puede repetir sin duplicar datos. Si la base de la nube
+ya tiene OTROS datos, se detiene sin tocar nada.
 """
 import os
 import sqlite3
+import subprocess
 import sys
 
 import db
+
+AQUI = os.path.dirname(os.path.abspath(__file__))
+
+if "--borrar-respaldo" in sys.argv:
+    borradas = db.borrar_respaldo_v1()
+    sys.exit("Copias borradas: " + ", ".join(borradas) if borradas else "No hay copias de seguridad que borrar.")
 
 if not db.USAR_PG:
     sys.exit("Falta DATABASE_URL en el archivo .env: sin ella no hay base de datos en la nube a la que copiar.")
@@ -16,29 +26,48 @@ if not os.path.exists(db.DB_FILE):
 
 origen = sqlite3.connect(db.DB_FILE)
 origen.row_factory = sqlite3.Row
-locales = {(r["id"], r["email"]) for r in origen.execute("SELECT id, email FROM usuarios")}
+columnas_locales = {r[1] for r in origen.execute("PRAGMA table_info(usuarios)")}
+if "nombre" in columnas_locales:  # su archivo local todavía tiene las 5 tablas: se convierte primero (en local)
+    origen.close()
+    print("Convirtiendo primero su archivo local a la estructura de 30 tablas...")
+    sin_nube = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+    r = subprocess.run([sys.executable, "-c", "import db; db.crear_esquema()"], cwd=AQUI, env=sin_nube)
+    if r.returncode:
+        sys.exit("No se pudo convertir el archivo local. No se copió nada.")
+    origen = sqlite3.connect(db.DB_FILE)
+    origen.row_factory = sqlite3.Row
 
-db.crear_esquema()  # solo las tablas: las cuentas iniciales NO se crean antes de copiar
-en_la_nube = {(r["id"], r["email"]) for r in db._consultar("SELECT id, email FROM usuarios")}
-if not en_la_nube <= locales:
-    sys.exit("La base de datos en la nube ya tiene cuentas que no están en su archivo local. Por seguridad "
-             "no se copió nada. Use una base de Supabase vacía para migrar.")
 
-for tabla in db.TABLAS:
+def filas_locales(tabla):
     try:
-        filas = [dict(r) for r in origen.execute(f"SELECT * FROM {tabla}")]
+        return [dict(r) for r in origen.execute(f"SELECT * FROM {tabla}")]
     except sqlite3.OperationalError:
-        continue  # esa tabla no existía en la base local
+        return []
+
+
+db.crear_esquema(sembrar=False)  # solo las tablas: nada se crea antes de copiar
+copias, columnas = {}, {}
+for tabla in db.TABLAS:
+    if tabla == "meta":
+        continue
+    locales = filas_locales(tabla)
     destino = db._columnas(tabla)
-    for f in filas:
-        if tabla == "usuarios" and f.get("foto") and os.path.exists(f["foto"]):
-            f["foto"] = db._foto_base64(f["foto"])[0] or ""  # las fotos guardadas como archivo pasan a la base
-        cols = [c for c in f if c in destino]
-        sql = (f"INSERT INTO {tabla}({', '.join(cols)}) VALUES({', '.join('?' for _ in cols)}) "
-               "ON CONFLICT DO NOTHING")
+    cols = sorted(set(locales[0]) & destino) if locales else sorted(destino)
+    en_nube = {tuple(f[c] for c in cols) for f in db._consultar(f"SELECT {', '.join(cols)} FROM {tabla}")}
+    if not en_nube <= {tuple(f[c] for c in cols) for f in locales}:
+        sys.exit(f"La base de datos en la nube ya tiene datos en «{tabla}» que no están en su archivo local. "
+                 "Por seguridad no se copió nada. Use una base de Supabase vacía para migrar.")
+    copias[tabla], columnas[tabla] = locales, cols
+
+for tabla, locales in copias.items():
+    cols = columnas[tabla]
+    for f in locales:
+        sql = f"INSERT INTO {tabla}({', '.join(cols)}) VALUES({', '.join('?' for _ in cols)}) ON CONFLICT DO NOTHING"
         db._ejecutar(sql, [f[c] for c in cols])
-    if tabla != "vinculos" and filas:  # que los números automáticos sigan después del último id copiado
-        db._ejecutar(f"SELECT setval(pg_get_serial_sequence('{tabla}', 'id'), (SELECT MAX(id) FROM {tabla}))")
-    print(f"{tabla}: {len(filas)} filas copiadas")
+    if locales:
+        print(f"{tabla}: {len(locales)} filas copiadas")
+with db._transaccion() as tx:
+    db._reajustar_secuencias(tx)  # que los números automáticos sigan después del último id copiado
+db.sembrar_catalogos()
 db.init_db()  # si faltara alguna cuenta de administración, se crea ahora
 print("Listo. Los datos locales ya están en Supabase.")

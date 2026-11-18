@@ -3,4 +3,4 @@ google-auth-oauthlib
 requests
 psycopg[binary]
 psycopg_pool
-pillowpip 
+pillow
